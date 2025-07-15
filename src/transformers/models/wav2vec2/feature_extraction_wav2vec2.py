@@ -73,13 +73,20 @@ class Wav2Vec2FeatureExtractor(SequenceFeatureExtractor):
         do_normalize=True,
         **kwargs,
     ):
-        super().__init__(feature_size=feature_size, sampling_rate=sampling_rate, padding_value=padding_value, **kwargs)
+        super().__init__(
+            feature_size=feature_size,
+            sampling_rate=sampling_rate,
+            padding_value=padding_value,
+            **kwargs,
+        )
         self.return_attention_mask = return_attention_mask
         self.do_normalize = do_normalize
 
     @staticmethod
     def zero_mean_unit_var_norm(
-        input_values: list[np.ndarray], attention_mask: list[np.ndarray], padding_value: float = 0.0
+        input_values: list[np.ndarray],
+        attention_mask: list[np.ndarray],
+        padding_value: float = 0.0,
     ) -> list[np.ndarray]:
         """
         Every array in the list is normalized to have zero mean and unit variance
@@ -89,13 +96,17 @@ class Wav2Vec2FeatureExtractor(SequenceFeatureExtractor):
             normed_input_values = []
 
             for vector, length in zip(input_values, attention_mask.sum(-1)):
-                normed_slice = (vector - vector[:length].mean()) / np.sqrt(vector[:length].var() + 1e-7)
+                normed_slice = (vector - vector[:length].mean()) / np.sqrt(
+                    vector[:length].var() + 1e-7
+                )
                 if length < normed_slice.shape[0]:
                     normed_slice[length:] = padding_value
 
                 normed_input_values.append(normed_slice)
         else:
-            normed_input_values = [(x - x.mean()) / np.sqrt(x.var() + 1e-7) for x in input_values]
+            normed_input_values = [
+                (x - x.mean()) / np.sqrt(x.var() + 1e-7) for x in input_values
+            ]
 
         return normed_input_values
 
@@ -116,9 +127,10 @@ class Wav2Vec2FeatureExtractor(SequenceFeatureExtractor):
 
         Args:
             raw_speech (`np.ndarray`, `list[float]`, `list[np.ndarray]`, `list[list[float]]`):
-                The sequence or batch of sequences to be padded. Each sequence can be a numpy array, a list of float
-                values, a list of numpy arrays or a list of list of float values. Must be mono channel audio, not
-                stereo, i.e. single float per timestep.
+            The sequence or batch of sequences to be padded. Each sequence can be a numpy array, a list of float
+            values, a list of numpy arrays or a list of list of float values. Can be either:
+            - 1D array/list representing mono channel audio (i.e., single float per timestep)
+            - 2D array/list representing features (e.g., spectrograms) with shape [feature_dim, time]
             padding (`bool`, `str` or [`~utils.PaddingStrategy`], *optional*, defaults to `False`):
                 Select a strategy to pad the returned sequences (according to the model's padding side and padding
                 index) among:
@@ -182,11 +194,23 @@ class Wav2Vec2FeatureExtractor(SequenceFeatureExtractor):
                 "Failing to do so can result in silent errors that might be hard to debug."
             )
 
-        is_batched_numpy = isinstance(raw_speech, np.ndarray) and len(raw_speech.shape) > 1
-        if is_batched_numpy and len(raw_speech.shape) > 2:
-            raise ValueError(f"Only mono-channel audio is supported for input to {self}")
+        is_batched_numpy = (
+            isinstance(raw_speech, np.ndarray) and len(raw_speech.shape) > 1
+        )
+        # Check for 3D input (channels, features, time) and handle it
+        if is_batched_numpy and len(raw_speech.shape) == 3:
+            # For 3D input, treat it as a batch of 2D inputs
+            # Each channel becomes a separate 2D input in the batch
+            raw_speech = [raw_speech[i] for i in range(raw_speech.shape[0])]
+            is_batched_numpy = False
+            is_batched = True
+        elif is_batched_numpy and len(raw_speech.shape) > 3:
+            raise ValueError(
+                f"Only mono-channel audio, 2D features, or 3D inputs (channels, features, time) are supported for input to {self}"
+            )
         is_batched = is_batched_numpy or (
-            isinstance(raw_speech, (list, tuple)) and (isinstance(raw_speech[0], (np.ndarray, tuple, list)))
+            isinstance(raw_speech, (list, tuple))
+            and (isinstance(raw_speech[0], (np.ndarray, tuple, list)))
         )
 
         # always return batch
@@ -208,31 +232,97 @@ class Wav2Vec2FeatureExtractor(SequenceFeatureExtractor):
         # convert input values to correct format
         input_values = padded_inputs["input_values"]
         if not isinstance(input_values[0], np.ndarray):
-            padded_inputs["input_values"] = [np.asarray(array, dtype=np.float32) for array in input_values]
+            padded_inputs["input_values"] = [
+                np.asarray(array, dtype=np.float32) for array in input_values
+            ]
         elif (
             not isinstance(input_values, np.ndarray)
             and isinstance(input_values[0], np.ndarray)
             and input_values[0].dtype is np.dtype(np.float64)
         ):
-            padded_inputs["input_values"] = [array.astype(np.float32) for array in input_values]
-        elif isinstance(input_values, np.ndarray) and input_values.dtype is np.dtype(np.float64):
+            padded_inputs["input_values"] = [
+                array.astype(np.float32) for array in input_values
+            ]
+        elif isinstance(input_values, np.ndarray) and input_values.dtype is np.dtype(
+            np.float64
+        ):
             padded_inputs["input_values"] = input_values.astype(np.float32)
 
         # convert attention_mask to correct format
         attention_mask = padded_inputs.get("attention_mask")
         if attention_mask is not None:
-            padded_inputs["attention_mask"] = [np.asarray(array, dtype=np.int32) for array in attention_mask]
+            padded_inputs["attention_mask"] = [
+                np.asarray(array, dtype=np.int32) for array in attention_mask
+            ]
 
         # zero-mean and unit-variance normalization
         if self.do_normalize:
             attention_mask = (
                 attention_mask
-                if self._get_padding_strategies(padding, max_length=max_length) is not PaddingStrategy.DO_NOT_PAD
+                if self._get_padding_strategies(padding, max_length=max_length)
+                is not PaddingStrategy.DO_NOT_PAD
                 else None
             )
-            padded_inputs["input_values"] = self.zero_mean_unit_var_norm(
-                padded_inputs["input_values"], attention_mask=attention_mask, padding_value=self.padding_value
-            )
+            # Handle different input dimensions for normalization
+            normalized_values = []
+            for i, x in enumerate(padded_inputs["input_values"]):
+                if len(x.shape) == 1:  # 1D input
+                    # Use existing normalization for 1D inputs
+                    if attention_mask is not None:
+                        mask = attention_mask[i]
+                        length = mask.sum()
+                        mean = x[:length].mean()
+                        var = x[:length].var()
+                        norm_x = (x - mean) / np.sqrt(var + 1e-7)
+                        # Apply padding value where masked
+                        if length < x.shape[0]:
+                            norm_x[length:] = self.padding_value
+                    else:
+                        norm_x = (x - x.mean()) / np.sqrt(x.var() + 1e-7)
+                    normalized_values.append(norm_x)
+                elif len(x.shape) == 2:  # 2D input (features, time)
+                    # Normalize each feature dimension separately
+                    if attention_mask is not None:
+                        mask = attention_mask[i]
+                        length = mask.sum()
+                        # Calculate mean and variance for each feature across valid time steps
+                        means = np.mean(x[:, :length], axis=1, keepdims=True)
+                        vars = np.var(x[:, :length], axis=1, keepdims=True)
+                        norm_x = (x - means) / np.sqrt(vars + 1e-7)
+                        # Apply padding value where masked
+                        if length < x.shape[1]:
+                            norm_x[:, length:] = self.padding_value
+                    else:
+                        means = np.mean(x, axis=1, keepdims=True)
+                        vars = np.var(x, axis=1, keepdims=True)
+                        norm_x = (x - means) / np.sqrt(vars + 1e-7)
+                    normalized_values.append(norm_x)
+                elif len(x.shape) == 3:  # 3D input (channels, features, time)
+                    # Normalize each feature dimension separately for each channel
+                    norm_channels = []
+                    for c in range(x.shape[0]):
+                        channel = x[c]
+                        if attention_mask is not None:
+                            mask = attention_mask[i]
+                            length = mask.sum()
+                            # Calculate mean and variance for each feature across valid time steps
+                            means = np.mean(channel[:, :length], axis=1, keepdims=True)
+                            vars = np.var(channel[:, :length], axis=1, keepdims=True)
+                            norm_channel = (channel - means) / np.sqrt(vars + 1e-7)
+                            # Apply padding value where masked
+                            if length < channel.shape[1]:
+                                norm_channel[:, length:] = self.padding_value
+                        else:
+                            means = np.mean(channel, axis=1, keepdims=True)
+                            vars = np.var(channel, axis=1, keepdims=True)
+                            norm_channel = (channel - means) / np.sqrt(vars + 1e-7)
+                        norm_channels.append(norm_channel)
+                    normalized_values.append(np.array(norm_channels))
+                else:
+                    raise ValueError(
+                        f"Input with {len(x.shape)} dimensions is not supported for normalization"
+                    )
+            padded_inputs["input_values"] = normalized_values
 
         if return_tensors is not None:
             padded_inputs = padded_inputs.convert_to_tensors(return_tensors)

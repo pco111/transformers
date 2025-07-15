@@ -20,7 +20,14 @@ from typing import Optional, Union
 import numpy as np
 
 from .feature_extraction_utils import BatchFeature, FeatureExtractionMixin
-from .utils import PaddingStrategy, TensorType, is_tf_tensor, is_torch_tensor, logging, to_numpy
+from .utils import (
+    PaddingStrategy,
+    TensorType,
+    is_tf_tensor,
+    is_torch_tensor,
+    logging,
+    to_numpy,
+)
 
 
 logger = logging.get_logger(__name__)
@@ -39,7 +46,9 @@ class SequenceFeatureExtractor(FeatureExtractionMixin):
             The value that is used to fill the padding values / vectors.
     """
 
-    def __init__(self, feature_size: int, sampling_rate: int, padding_value: float, **kwargs):
+    def __init__(
+        self, feature_size: int, sampling_rate: int, padding_value: float, **kwargs
+    ):
         self.feature_size = feature_size
         self.sampling_rate = sampling_rate
         self.padding_value = padding_value
@@ -122,9 +131,12 @@ class SequenceFeatureExtractor(FeatureExtractionMixin):
         """
         # If we have a list of dicts, let's convert it in a dict of lists
         # We do this to allow using this method as a collate_fn function in PyTorch Dataloader
-        if isinstance(processed_features, (list, tuple)) and isinstance(processed_features[0], (dict, BatchFeature)):
+        if isinstance(processed_features, (list, tuple)) and isinstance(
+            processed_features[0], (dict, BatchFeature)
+        ):
             processed_features = {
-                key: [example[key] for example in processed_features] for key in processed_features[0].keys()
+                key: [example[key] for example in processed_features]
+                for key in processed_features[0].keys()
             }
 
         # The model's main input name, usually `input_values`, has be passed for padding
@@ -137,7 +149,9 @@ class SequenceFeatureExtractor(FeatureExtractionMixin):
 
         required_input = processed_features[self.model_input_names[0]]
         return_attention_mask = (
-            return_attention_mask if return_attention_mask is not None else self.return_attention_mask
+            return_attention_mask
+            if return_attention_mask is not None
+            else self.return_attention_mask
         )
 
         if len(required_input) == 0:
@@ -178,13 +192,17 @@ class SequenceFeatureExtractor(FeatureExtractionMixin):
                 processed_features[key] = [to_numpy(v) for v in value]
 
         # Convert padding_strategy in PaddingStrategy
-        padding_strategy = self._get_padding_strategies(padding=padding, max_length=max_length)
+        padding_strategy = self._get_padding_strategies(
+            padding=padding, max_length=max_length
+        )
 
         required_input = processed_features[self.model_input_names[0]]
 
         batch_size = len(required_input)
         if not all(len(v) == batch_size for v in processed_features.values()):
-            raise ValueError("Some items in the output dictionary have a different batch size than others.")
+            raise ValueError(
+                "Some items in the output dictionary have a different batch size than others."
+            )
 
         truncated_inputs = []
         for i in range(batch_size):
@@ -200,7 +218,10 @@ class SequenceFeatureExtractor(FeatureExtractionMixin):
 
         if padding_strategy == PaddingStrategy.LONGEST:
             # make sure that `max_length` cannot be longer than the longest truncated length
-            max_length = max(len(input_slice[self.model_input_names[0]]) for input_slice in truncated_inputs)
+            max_length = max(
+                len(input_slice[self.model_input_names[0]])
+                for input_slice in truncated_inputs
+            )
             padding_strategy = PaddingStrategy.MAX_LENGTH
 
         batch_outputs = {}
@@ -220,6 +241,38 @@ class SequenceFeatureExtractor(FeatureExtractionMixin):
                 if value.dtype is np.dtype(np.float64):
                     value = value.astype(np.float32)
                 batch_outputs[key].append(value)
+
+        # For 2D and 3D arrays, ensure all arrays in the batch have the same feature dimension(s)
+        if self.model_input_names[0] in batch_outputs:
+            input_values = batch_outputs[self.model_input_names[0]]
+            if len(input_values) > 0:
+                # Check for 2D arrays
+                if all(
+                    isinstance(v, np.ndarray) and len(v.shape) == 2
+                    for v in input_values
+                ):
+                    # Check if all 2D arrays have the same first dimension (feature dimension)
+                    feature_dims = [v.shape[0] for v in input_values]
+                    if len(set(feature_dims)) > 1:
+                        raise ValueError(
+                            f"All 2D input arrays must have the same feature dimension. Got dimensions: {feature_dims}"
+                        )
+                # Check for 3D arrays
+                elif all(
+                    isinstance(v, np.ndarray) and len(v.shape) == 3
+                    for v in input_values
+                ):
+                    # Check if all 3D arrays have the same first two dimensions (channel and feature dimensions)
+                    channel_dims = [v.shape[0] for v in input_values]
+                    feature_dims = [v.shape[1] for v in input_values]
+                    if len(set(channel_dims)) > 1:
+                        raise ValueError(
+                            f"All 3D input arrays must have the same channel dimension. Got dimensions: {channel_dims}"
+                        )
+                    if len(set(feature_dims)) > 1:
+                        raise ValueError(
+                            f"All 3D input arrays must have the same feature dimension. Got dimensions: {feature_dims}"
+                        )
 
         return BatchFeature(batch_outputs, tensor_type=return_tensors)
 
@@ -262,13 +315,22 @@ class SequenceFeatureExtractor(FeatureExtractionMixin):
         if padding_strategy == PaddingStrategy.LONGEST:
             max_length = len(required_input)
 
-        if max_length is not None and pad_to_multiple_of is not None and (max_length % pad_to_multiple_of != 0):
+        if (
+            max_length is not None
+            and pad_to_multiple_of is not None
+            and (max_length % pad_to_multiple_of != 0)
+        ):
             max_length = ((max_length // pad_to_multiple_of) + 1) * pad_to_multiple_of
 
-        needs_to_be_padded = padding_strategy != PaddingStrategy.DO_NOT_PAD and len(required_input) < max_length
+        needs_to_be_padded = (
+            padding_strategy != PaddingStrategy.DO_NOT_PAD
+            and len(required_input) < max_length
+        )
 
         if return_attention_mask and "attention_mask" not in processed_features:
-            processed_features["attention_mask"] = np.ones(len(required_input), dtype=np.int32)
+            processed_features["attention_mask"] = np.ones(
+                len(required_input), dtype=np.int32
+            )
 
         if needs_to_be_padded:
             difference = max_length - len(required_input)
@@ -277,18 +339,53 @@ class SequenceFeatureExtractor(FeatureExtractionMixin):
                     processed_features["attention_mask"] = np.pad(
                         processed_features["attention_mask"], (0, difference)
                     )
-                padding_shape = ((0, difference), (0, 0)) if self.feature_size > 1 else (0, difference)
+
+                # Determine padding shape based on input dimensions
+                if len(required_input.shape) == 1:
+                    # 1D input case (original behavior)
+                    padding_shape = (0, difference)
+                elif len(required_input.shape) == 2:
+                    # 2D input case - pad only the time dimension (second dimension)
+                    padding_shape = ((0, 0), (0, difference))
+                elif len(required_input.shape) == 3:
+                    # 3D input case - pad only the time dimension (third dimension)
+                    padding_shape = ((0, 0), (0, 0), (0, difference))
+                else:
+                    # Higher dimensional inputs not supported
+                    raise ValueError(
+                        f"Input with {len(required_input.shape)} dimensions is not supported. Only 1D, 2D, and 3D inputs are supported."
+                    )
+
                 processed_features[self.model_input_names[0]] = np.pad(
-                    required_input, padding_shape, "constant", constant_values=self.padding_value
+                    required_input,
+                    padding_shape,
+                    "constant",
+                    constant_values=self.padding_value,
                 )
             elif self.padding_side == "left":
                 if return_attention_mask:
                     processed_features["attention_mask"] = np.pad(
                         processed_features["attention_mask"], (difference, 0)
                     )
-                padding_shape = ((difference, 0), (0, 0)) if self.feature_size > 1 else (difference, 0)
+
+                # Determine padding shape based on input dimensions
+                if len(required_input.shape) == 1:
+                    # 1D input case (original behavior)
+                    padding_shape = (difference, 0)
+                elif len(required_input.shape) == 2:
+                    # 2D input case - pad only the time dimension (second dimension)
+                    padding_shape = ((0, 0), (difference, 0))
+                else:
+                    # Higher dimensional inputs not supported
+                    raise ValueError(
+                        f"Input with {len(required_input.shape)} dimensions is not supported. Only 1D and 2D inputs are supported."
+                    )
+
                 processed_features[self.model_input_names[0]] = np.pad(
-                    required_input, padding_shape, "constant", constant_values=self.padding_value
+                    required_input,
+                    padding_shape,
+                    "constant",
+                    constant_values=self.padding_value,
                 )
             else:
                 raise ValueError("Invalid padding strategy:" + str(self.padding_side))
@@ -321,20 +418,30 @@ class SequenceFeatureExtractor(FeatureExtractionMixin):
         if not truncation:
             return processed_features
         elif truncation and max_length is None:
-            raise ValueError("When setting ``truncation=True``, make sure that ``max_length`` is defined.")
+            raise ValueError(
+                "When setting ``truncation=True``, make sure that ``max_length`` is defined."
+            )
 
         required_input = processed_features[self.model_input_names[0]]
 
         # find `max_length` that fits `pad_to_multiple_of`
-        if max_length is not None and pad_to_multiple_of is not None and (max_length % pad_to_multiple_of != 0):
+        if (
+            max_length is not None
+            and pad_to_multiple_of is not None
+            and (max_length % pad_to_multiple_of != 0)
+        ):
             max_length = ((max_length // pad_to_multiple_of) + 1) * pad_to_multiple_of
 
         needs_to_be_truncated = len(required_input) > max_length
 
         if needs_to_be_truncated:
-            processed_features[self.model_input_names[0]] = processed_features[self.model_input_names[0]][:max_length]
+            processed_features[self.model_input_names[0]] = processed_features[
+                self.model_input_names[0]
+            ][:max_length]
             if "attention_mask" in processed_features:
-                processed_features["attention_mask"] = processed_features["attention_mask"][:max_length]
+                processed_features["attention_mask"] = processed_features[
+                    "attention_mask"
+                ][:max_length]
 
         return processed_features
 
@@ -346,7 +453,9 @@ class SequenceFeatureExtractor(FeatureExtractionMixin):
         # Get padding strategy
         if padding is not False:
             if padding is True:
-                padding_strategy = PaddingStrategy.LONGEST  # Default to pad to the longest sequence in the batch
+                padding_strategy = (
+                    PaddingStrategy.LONGEST
+                )  # Default to pad to the longest sequence in the batch
             elif not isinstance(padding, PaddingStrategy):
                 padding_strategy = PaddingStrategy(padding)
             elif isinstance(padding, PaddingStrategy):
@@ -362,7 +471,9 @@ class SequenceFeatureExtractor(FeatureExtractionMixin):
                 )
 
         # Test if we have a padding value
-        if padding_strategy != PaddingStrategy.DO_NOT_PAD and (self.padding_value is None):
+        if padding_strategy != PaddingStrategy.DO_NOT_PAD and (
+            self.padding_value is None
+        ):
             raise ValueError(
                 "Asking to pad but the feature_extractor does not have a padding value. Please select a value to use"
                 " as `padding_value`. For example: `feature_extractor.padding_value = 0.0`."
