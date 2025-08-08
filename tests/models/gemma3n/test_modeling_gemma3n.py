@@ -436,6 +436,69 @@ class Gemma3nTextModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.Tes
     def test_generate_with_quant_cache(self):
         pass
 
+    @require_torch
+    def test_resize_token_embeddings_with_special_tokens(self):
+        """Test that resize_token_embeddings correctly handles both embed_tokens and embed_tokens_per_layer."""
+        config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
+
+        for model_class in self.all_model_classes:
+            model = model_class(config)
+            model.eval()
+
+            original_vocab_size = config.vocab_size
+
+            # Test expanding vocabulary
+            new_vocab_size = original_vocab_size + 5
+
+            # Resize embeddings
+            model.resize_token_embeddings(new_vocab_size)
+
+            # Check that main embedding was resized
+            self.assertEqual(model.get_input_embeddings().num_embeddings, new_vocab_size)
+
+            # For text models, check that per-layer embedding was also resized
+            if hasattr(model, "embed_tokens_per_layer"):
+                self.assertEqual(model.embed_tokens_per_layer.num_embeddings, new_vocab_size)
+                self.assertEqual(model.config.vocab_size_per_layer_input, new_vocab_size)
+
+                # Debug: Print the sizes to verify
+                print(f"Main embedding size: {model.get_input_embeddings().num_embeddings}")
+                print(f"Per-layer embedding size: {model.embed_tokens_per_layer.num_embeddings}")
+                print(f"Config vocab_size_per_layer_input: {model.config.vocab_size_per_layer_input}")
+            elif hasattr(model, "language_model") and hasattr(model.language_model, "embed_tokens_per_layer"):
+                self.assertEqual(model.language_model.embed_tokens_per_layer.num_embeddings, new_vocab_size)
+                self.assertEqual(model.language_model.config.vocab_size_per_layer_input, new_vocab_size)
+
+            # Test forward pass with original token ids (should always work)
+            input_ids = inputs_dict["input_ids"]
+            # Ensure input_ids are within the original vocab range
+            input_ids = torch.clamp(input_ids, min=0, max=original_vocab_size - 1)
+
+            # This should not raise an error
+            try:
+                outputs = model(input_ids=input_ids)
+                # Different model classes have different outputs
+                if hasattr(outputs, "last_hidden_state"):
+                    self.assertIsNotNone(outputs.last_hidden_state)
+                elif hasattr(outputs, "logits"):
+                    self.assertIsNotNone(outputs.logits)
+                else:
+                    self.assertIsNotNone(outputs)
+            except Exception as e:
+                self.fail(f"Forward pass failed after resize_token_embeddings with original tokens: {e}")
+
+            # Test shrinking vocabulary
+            smaller_vocab_size = original_vocab_size - 2
+            model.resize_token_embeddings(smaller_vocab_size)
+
+            # Check that embeddings were properly resized
+            self.assertEqual(model.get_input_embeddings().num_embeddings, smaller_vocab_size)
+
+            if hasattr(model, "embed_tokens_per_layer"):
+                self.assertEqual(model.embed_tokens_per_layer.num_embeddings, smaller_vocab_size)
+            elif hasattr(model, "language_model") and hasattr(model.language_model, "embed_tokens_per_layer"):
+                self.assertEqual(model.language_model.embed_tokens_per_layer.num_embeddings, smaller_vocab_size)
+
 
 class Gemma3nVision2TextModelTester:
     text_config = {"activation_sparsity_pattern": None}

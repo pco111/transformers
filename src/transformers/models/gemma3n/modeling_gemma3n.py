@@ -1748,6 +1748,101 @@ class Gemma3nTextModel(Gemma3nPreTrainedModel):
             dtype=inputs_embeds.dtype, device=per_layer_projection.device
         )
 
+    def resize_token_embeddings(
+        self,
+        new_num_tokens: Optional[int] = None,
+        pad_to_multiple_of: Optional[int] = None,
+        mean_resizing: bool = True,
+    ) -> nn.Embedding:
+        """
+        Resizes input token embeddings matrix of the model if `new_num_tokens != config.vocab_size`.
+
+        Takes care of tying weights embeddings afterwards if the model class has a `tie_weights()` method.
+
+        For Gemma3n models, this method also resizes the `embed_tokens_per_layer` embedding to ensure
+        consistency between the main embedding layer and the per-layer embedding layer.
+
+        Arguments:
+            new_num_tokens (`int`, *optional*):
+                The new number of tokens in the embedding matrix. Increasing the size will add newly initialized
+                vectors at the end. Reducing the size will remove vectors from the end. If not provided or `None`, just
+                returns a pointer to the input tokens `torch.nn.Embedding` module of the model without doing anything.
+            pad_to_multiple_of (`int`, *optional*):
+                If set will pad the embedding matrix to a multiple of the provided value.If `new_num_tokens` is set to
+                `None` will just pad the embedding to a multiple of `pad_to_multiple_of`.
+
+                This is especially useful to enable the use of Tensor Cores on NVIDIA hardware with compute capability
+                `>= 7.5` (Volta), or on TPUs which benefit from having sequence lengths be a multiple of 128. For more
+                details about this, or help on choosing the correct value for resizing, refer to this guide:
+                https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/index.html#requirements-tc
+            mean_resizing (`bool`):
+                Whether to initialize the added embeddings from a multivariate normal distribution that has old embeddings' mean and
+                covariance or to initialize them with a normal distribution that has a mean of zero and std equals `config.initializer_range`.
+
+        Return:
+            `torch.nn.Embedding`: Pointer to the input tokens Embeddings Module of the model.
+        """
+        # First, resize the main embedding layer using the parent class method
+        model_embeds = super().resize_token_embeddings(new_num_tokens, pad_to_multiple_of, mean_resizing)
+
+        if new_num_tokens is None and pad_to_multiple_of is None:
+            return model_embeds
+
+        # Calculate the final vocab size after potential padding
+        if new_num_tokens is None:
+            new_num_tokens = model_embeds.num_embeddings
+        if pad_to_multiple_of is not None:
+            new_num_tokens = ((new_num_tokens + pad_to_multiple_of - 1) // pad_to_multiple_of) * pad_to_multiple_of
+
+        # Now we need to resize the embed_tokens_per_layer to match the new vocab size
+        old_per_layer_embeddings = self.embed_tokens_per_layer
+        old_num_tokens = old_per_layer_embeddings.num_embeddings
+
+        if new_num_tokens == old_num_tokens:
+            return model_embeds
+
+        # Create new per-layer embedding with the updated vocab size
+        new_per_layer_embeddings = Gemma3nTextScaledWordEmbedding(
+            new_num_tokens,
+            self.config.num_hidden_layers * self.config.hidden_size_per_layer_input,
+            self.padding_idx,
+            embed_scale=self.config.hidden_size_per_layer_input**0.5,
+        )
+
+        # Initialize the new embedding layer
+        new_per_layer_embeddings.to(
+            old_per_layer_embeddings.weight.device, dtype=old_per_layer_embeddings.weight.dtype
+        )
+
+        # Copy existing embeddings
+        with torch.no_grad():
+            num_tokens_to_copy = min(old_num_tokens, new_num_tokens)
+            new_per_layer_embeddings.weight[:num_tokens_to_copy] = old_per_layer_embeddings.weight[:num_tokens_to_copy]
+
+            # Initialize new tokens if we're expanding
+            if new_num_tokens > old_num_tokens:
+                if mean_resizing and old_num_tokens > 0:
+                    # Initialize new embeddings using mean and std of existing embeddings
+                    mean_weights = old_per_layer_embeddings.weight.mean(dim=0, keepdim=True)
+                    std_weights = old_per_layer_embeddings.weight.std(dim=0, keepdim=True)
+                    new_per_layer_embeddings.weight[old_num_tokens:] = torch.normal(
+                        mean_weights.expand(new_num_tokens - old_num_tokens, -1),
+                        std_weights.expand(new_num_tokens - old_num_tokens, -1),
+                    )
+                else:
+                    # Initialize new embeddings with normal distribution
+                    new_per_layer_embeddings.weight[old_num_tokens:].normal_(
+                        mean=0.0, std=self.config.initializer_range
+                    )
+
+        # Replace the old embedding layer
+        self.embed_tokens_per_layer = new_per_layer_embeddings
+
+        # Update config if needed
+        self.config.vocab_size_per_layer_input = new_num_tokens
+
+        return model_embeds
+
 
 @auto_docstring(custom_intro="The base Gemma 3n language model with a language modeling head.")
 class Gemma3nForCausalLM(Gemma3nPreTrainedModel, GenerationMixin):
